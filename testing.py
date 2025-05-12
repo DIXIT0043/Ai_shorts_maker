@@ -5,12 +5,12 @@ import numpy as np
 import json
 import math
 import pdb
-from groq import Groq
-from langchain_groq import ChatGroq
+# from groq import Groq
+# from langchain_groq import ChatGroq
 from langchain.prompts import ChatPromptTemplate
 import os
 from moviepy.editor import VideoFileClip
-import speech_recognition as sr
+import speech_recognition as sr 
 from pydub import AudioSegment
 import tempfile
 from langchain_community.llms import Ollama
@@ -18,17 +18,18 @@ from langchain.callbacks.manager import CallbackManager
 from langchain.callbacks.streaming_stdout import StreamingStdOutCallbackHandler
 
 from youtube_transcript_api import YouTubeTranscriptApi
-groq_api_key = os.getenv("GROQ_API_KEY")
+# groq_api_key = os.getenv("GROQ_API_KEY")
 
-"""Cell 3: Download YouTube Video function"""
+import google.generativeai as genai  # Add this import
+
 
 def download_video(url, filename):
     yt = YouTube(url)
-    # Get the highest resolution stream that's 1080p or lower
-    video = yt.streams.filter(progressive=True, file_extension='mp4', resolution='1080p').first()
+    # Get the highest quality stream available
+    video = yt.streams.get_highest_resolution()
     if not video:
-        # If 1080p is not available, get the highest available resolution
-        video = yt.streams.filter(progressive=True, file_extension='mp4').order_by('resolution').desc().first()
+        # Fallback to any available stream
+        video = yt.streams.first()
     video.download(filename=filename)
 
 
@@ -39,27 +40,66 @@ def segment_video(response):
         video = VideoFileClip("input_video.mp4")
         
         for i, segment in enumerate(response):
-            start_time = float(segment.get("start_time", 0))
-            end_time = float(segment.get("end_time", 0))
-            
-            # Extract the segment
-            video_segment = video.subclip(start_time, end_time)
-            
-            # Save the segment
-            output_file = f"output{str(i).zfill(3)}.mp4"
-            video_segment.write_videofile(output_file, codec='libx264', audio_codec='aac')
-            
-            # Close the segment to free up resources
-            video_segment.close()
-            
-            print(f"Successfully created segment {i+1}")
+            try:
+                start_time = float(segment.get("start_time", 0))
+                end_time = float(segment.get("end_time", 0))
+                
+                # Basic validation only
+                if start_time >= end_time:
+                    print(f"Invalid time range for segment {i+1}: start_time ({start_time}) >= end_time ({end_time})")
+                    continue
+                
+                # Extract the segment exactly as specified by LLM
+                video_segment = video.subclip(start_time, end_time)
+                
+                # Save the segment with high quality settings
+                output_file = f"output{str(i).zfill(3)}.mp4"
+                try:
+                    video_segment.write_videofile(
+                        output_file,
+                        codec='libx264',
+                        audio_codec='aac',
+                        bitrate='8000k',  # High bitrate for better quality
+                        preset='slow',    # Better compression
+                        threads=4,        # Use multiple threads
+                        fps=30,          # Maintain original frame rate
+                        ffmpeg_params=[
+                            '-crf', '17',  # High quality (lower is better, range 0-51)
+                            '-profile:v', 'high',
+                            '-level', '4.0',
+                            '-pix_fmt', 'yuv420p'
+                        ],
+                        logger=None,
+                        verbose=False
+                    )
+                    print(f"Successfully created segment {i+1} (duration: {end_time - start_time:.2f}s)")
+                except Exception as e:
+                    print(f"Error writing segment {i+1}: {str(e)}")
+                    continue
+                finally:
+                    try:
+                        video_segment.close()
+                    except:
+                        pass
+                
+            except Exception as e:
+                print(f"Error processing segment {i+1}: {str(e)}")
+                continue
         
         # Close the main video
-        video.close()
+        try:
+            video.close()
+        except:
+            pass
+            
         return True
         
     except Exception as e:
         print(f"Error in segment_video: {str(e)}")
+        try:
+            video.close()
+        except:
+            pass
         return False
 
 
@@ -194,26 +234,18 @@ def generate_transcript_from_audio():
 
 #Analyze transcript with GPT-3 function
 def analyze_transcript(transcript):
-    llm = ChatGroq(
-        api_key=groq_api_key,
-        model_name="deepseek-r1-distill-llama-70b",
-        )
-    # Initialize Ollama
-    # llm = Ollama(
-    #     model="mistral",
-    #     callback_manager=CallbackManager([StreamingStdOutCallbackHandler()]),
-    #     temperature=0.7,
-    # )
-    
-    # Create the prompt template with more explicit instructions and example
     template = """You are a ViralGPT helpful assistant. You are master at reading youtube transcripts and identifying the most Interesting and Viral Content.
     
-    This is a transcript of a video. Please identify 3-7 segments (20-30 seconds each) that have the highest potential to go viral on social media. Consider factors like:
+    This is a transcript of a video. Please identify the 5 most viral-worthy segments from the video. Consider factors like:
     - Engaging storytelling
     - Emotional moments 
     - Surprising revelations
     - Humorous content
     - Valuable insights
+    - Controversial or thought-provoking content
+    - Unique perspectives or rare information
+    - Personal stories or experiences
+    - Unexpected twists or revelations
     
     IMPORTANT: Your response MUST be a valid JSON array with exactly this format:
     [
@@ -228,44 +260,44 @@ def analyze_transcript(transcript):
             "end_time": 170.88,
             "description": "Explanation of real spy movie techniques and dead letter boxes",
             "duration": 43.68
-        }},
-        {{
-            "start_time": 259.70,
-            "end_time": 298.94,
-            "description": "Discussion about Cambridge Five and recommendation of Tinker Tailor Soldier Spy",
-            "duration": 39.24
         }}
     ]
     
     Rules:
-    1. Each segment should be 20-30 seconds in duration
-    2. Use the exact timestamps from the transcript
-    3. Include a brief description of what happens in each segment
-    4. Calculate duration as end_time - start_time
-    6. DO NOT include any thinking or explanation, just return the JSON array
-    7. The transcript is in Hindi, but provide descriptions in English
-    8. Make sure to select segments with high viral potential based on the factors above
+    1. Use the exact timestamps from the transcript
+    2. Include a brief description of what happens in each segment
+    3. Calculate duration as end_time - start_time
+    4. Each segment MUST be self-contained and make complete sense on its own
+    5. DO NOT include any thinking or explanation, just return the JSON array
+    6. The transcript is in Hindi, but provide descriptions in English
+    7. Make sure to select segments with high viral potential based on the factors above
+    8. Ensure each segment has a clear beginning and end, and the content flows naturally
+    9. Avoid cutting sentences or thoughts in the middle - each segment should be a complete thought or story
+    10. IMPORTANT: Look for natural break points in the transcript (end of sentences, pauses, topic changes)
+    11. Return ONLY 5 segments maximum to avoid token limits
+    12. STRICTLY Focus on finding truly viral moments that would make people want to share
     
     Here is the Transcription:
-    {transcript}
+    {transcript}`
     """
     
-    prompt = ChatPromptTemplate.from_template(template)
+    # Google Gemini API setup
+    gemini_api_key = os.getenv("GEMINI_API_KEY")
+    genai.configure(api_key=gemini_api_key)
     
-    # Format the messages
-    messages = prompt.format_messages(
-        transcript=transcript
-    )
-    
-    # Get the response
-    response = llm.invoke(messages[0].content)
+    # Use gemini-2.0-flash model
+    model = genai.GenerativeModel("gemini-2.0-flash")
+
+    # Format prompt for Gemini
+    prompt = template.format(transcript=transcript)
+
+    # Get the response from Gemini
+    response = model.generate_content(prompt)
+    content = response.text.strip()
     
     # Parse the response content
     try:
         # Clean the response content to ensure it's valid JSON
-        content = response.content.strip()
-        
-        # Remove any markdown code block indicators if present
         if content.startswith('```json'):
             content = content[7:]
         if content.endswith('```'):
@@ -295,10 +327,8 @@ def analyze_transcript(transcript):
                 print(f"Segment missing required fields: {segment}")
                 return []
             
-            # Validate duration
-            calculated_duration = segment["end_time"] - segment["start_time"]
-            if abs(calculated_duration - segment["duration"]) > 0.1:
-                segment["duration"] = calculated_duration
+            # Update duration in the segment
+            segment["duration"] = segment["end_time"] - segment["start_time"]
         
         return parsed_response
     except (json.JSONDecodeError, ValueError) as e:
