@@ -52,15 +52,14 @@ def combine_videos(top_video_path, bottom_video_path, output_path):
         threads=4,        # Use multiple threads for faster processing
         fps=30           # Maintain original frame rate
     )
-    
-    # Close the clips
+
     top_clip.close()
     bottom_clip.close()
     final_clip.close()
 
 if __name__ == "__main__":
-    folder_1 = "./out_2"  # Folder containing shorts
-    folder_2 = "./folder_2"  # Folder containing the single video
+    folder_1 = "./out_7"  # Folder containing shorts
+    folder_2 = "./folder_3"  # Folder containing the single video
     output_folder = "./combined_videos"
     
     # Create output folder if it doesn't exist

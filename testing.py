@@ -21,16 +21,41 @@ from youtube_transcript_api import YouTubeTranscriptApi
 # groq_api_key = os.getenv("GROQ_API_KEY")
 
 import google.generativeai as genai  # Add this import
+from urllib.error import HTTPError
+import time
+import random
 
 
-def download_video(url, filename):
-    yt = YouTube(url)
-    # Get the highest quality stream available
-    video = yt.streams.get_highest_resolution()
-    if not video:
-        # Fallback to any available stream
-        video = yt.streams.first()
-    video.download(filename=filename)
+def download_video(url, filename, max_retries=3):
+    for attempt in range(max_retries):
+        try:
+            yt = YouTube(url)
+            # Get the highest quality stream available
+            video = yt.streams.get_highest_resolution()
+            if not video:
+                # Fallback to any available stream
+                video = yt.streams.first()
+            
+            if not video:
+                raise Exception("No suitable video stream found")
+                
+            # Add a small delay before downloading to avoid rate limiting
+            time.sleep(random.uniform(1, 3))
+            
+            video.download(filename=filename)
+            print(f"Successfully downloaded video to {filename}")
+            return
+            
+        except Exception as e:
+            print(f"Attempt {attempt + 1}/{max_retries} failed: {str(e)}")
+            if attempt < max_retries - 1:
+                # Add exponential backoff between retries
+                wait_time = (attempt + 1) * 2
+                print(f"Waiting {wait_time} seconds before retrying...")
+                time.sleep(wait_time)
+            else:
+                print("Max retries reached. Download failed.")
+                raise Exception(f"Failed to download video after {max_retries} attempts: {str(e)}")
 
 
 #Segment Video function
@@ -48,7 +73,7 @@ def segment_video(response):
                 if start_time >= end_time:
                     print(f"Invalid time range for segment {i+1}: start_time ({start_time}) >= end_time ({end_time})")
                     continue
-                
+
                 # Extract the segment exactly as specified by LLM
                 video_segment = video.subclip(start_time, end_time)
                 
@@ -59,12 +84,12 @@ def segment_video(response):
                         output_file,
                         codec='libx264',
                         audio_codec='aac',
-                        bitrate='8000k',  # High bitrate for better quality
+                        bitrate='10000k',  # High bitrate for better quality
                         preset='slow',    # Better compression
                         threads=4,        # Use multiple threads
                         fps=30,          # Maintain original frame rate
                         ffmpeg_params=[
-                            '-crf', '17',  # High quality (lower is better, range 0-51)
+                            '-crf', '10',  # High quality (lower is better, range 0-51)
                             '-profile:v', 'high',
                             '-level', '4.0',
                             '-pix_fmt', 'yuv420p'
@@ -234,52 +259,45 @@ def generate_transcript_from_audio():
 
 #Analyze transcript with GPT-3 function
 def analyze_transcript(transcript):
-    template = """You are a ViralGPT helpful assistant. You are master at reading youtube transcripts and identifying the most Interesting and Viral Content.
-    
-    This is a transcript of a video. Please identify the 5 most viral-worthy segments from the video. Consider factors like:
-    - Engaging storytelling
-    - Emotional moments 
-    - Surprising revelations
-    - Humorous content
-    - Valuable insights
-    - Controversial or thought-provoking content
-    - Unique perspectives or rare information
-    - Personal stories or experiences
-    - Unexpected twists or revelations
-    
-    IMPORTANT: Your response MUST be a valid JSON array with exactly this format:
+    template = """
+    Here is the transcript to analyze: {transcript}
+    You are a viral content curator specialized in identifying highly engaging short-form video segments. 
+    Your task is to identify 3-7 most viral viral-worthy segments from the transcript that would perform well on platforms like YouTube Shorts, Instagram Reels.
+    STRICTLY THE GENERATED SEGMENTS SHOULD BE SELF-CONTAINED AND MAKE SENSE(THEY SHOULD MAKE SENSE EVEN IF THEY ARE TAKEN OUT OF CONTEXT) ON THEIR OWN.
+    KEY REQUIREMENTS:
+    1. Segment Length: MUST be 25-70(STRICTLY) seconds long (optimal for short-form platforms)
+    2. Content Type: Must be engaging, shareable, and self-contained
+    3. Content Categories to Look For:
+       - Funny moments or jokes
+       - Surprising revelations or plot twists
+       - Emotional or inspiring moments
+       - Useful tips or life hacks
+       - Interesting facts or educational bits
+       - Dramatic or intense scenes
+       - Relatable situations
+       - Impressive skills or talents
+
+    OUTPUT FORMAT:
+    Return a JSON array with ONLY the segments that meet ALL requirements:
     [
         {{
             "start_time": 12.84,
             "end_time": 45.56,
-            "description": "Discussion about unrealistic aspects of Indian spy movies",
-            "duration": 32.72
-        }},
-        {{
-            "start_time": 127.20,
-            "end_time": 170.88,
-            "description": "Explanation of real spy movie techniques and dead letter boxes",
-            "duration": 43.68
+            "description": "Brief description of the segment and why it's viral-worthy",
+            "duration": 32.72,
+            "category": "One of: Humor, Education, Inspiration, Drama, Surprise, Tutorial, Talent"
         }}
     ]
-    
-    Rules:
-    1. Use the exact timestamps from the transcript
-    2. Include a brief description of what happens in each segment
-    3. Calculate duration as end_time - start_time
-    4. Each segment MUST be self-contained and make complete sense on its own
-    5. DO NOT include any thinking or explanation, just return the JSON array
-    6. The transcript is in Hindi, but provide descriptions in English
-    7. Make sure to select segments with high viral potential based on the factors above
-    8. Ensure each segment has a clear beginning and end, and the content flows naturally
-    9. Avoid cutting sentences or thoughts in the middle - each segment should be a complete thought or story
-    10. IMPORTANT: Look for natural break points in the transcript (end of sentences, pauses, topic changes)
-    11. Return ONLY 5 segments maximum to avoid token limits
-    12. STRICTLY Focus on finding truly viral moments that would make people want to share
-    
-    Here is the Transcription:
-    {transcript}`
-    """
+
+    IMPORTANT RULES:
+    - REJECT any segment longer than 70 seconds
+    - REJECT any segment shorter than 25 seconds
+    - REJECT any segment without a clear hook
+    - REJECT any segment with technical issues
+    - Each segment must be self-contained and make sense on its own
+    - Prioritize segments with strong emotional impact or value
+    - Look for moments that would make viewers want to share or rewatch
+"""
     
     # Google Gemini API setup
     gemini_api_key = os.getenv("GEMINI_API_KEY")
@@ -322,7 +340,7 @@ def analyze_transcript(transcript):
         
         # Ensure each segment has the required fields
         for segment in parsed_response:
-            required_fields = ["start_time", "end_time", "description", "duration"]
+            required_fields = ["start_time", "end_time", "description", "duration", "category"]
             if not all(field in segment for field in required_fields):
                 print(f"Segment missing required fields: {segment}")
                 return []
